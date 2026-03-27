@@ -50,7 +50,17 @@ except ImportError:  # pragma: no cover
                     return dict(self._data)
 
 
-BUSINESS_TYPES: tuple[str, ...] = ("food", "cafe", "stationery")
+BUSINESS_TYPES: tuple[str, ...] = (
+    "fast_food",
+    "cafe",
+    "food",
+    "stationery",
+    "general_store",
+    "fruits_and_juice",
+    "tea_stall",
+    "medical_store",
+    "restaurants",
+)
 
 
 class RandomAdapter:
@@ -137,6 +147,13 @@ class Position:
     y: int
 
 
+@dataclass(frozen=True)
+class PriceRange:
+    min_price: float
+    max_price: float
+    default_price: float
+
+
 @dataclass
 class EnvironmentConfig:
     grid_size: tuple[int, int] = (10, 10)
@@ -146,6 +163,7 @@ class EnvironmentConfig:
     min_price: float = 1.0
     max_price: float = 10.0
     initial_price: float = 5.0
+    price_ranges_by_type: dict[str, PriceRange] | None = None
     base_operating_cost: float = 8.0
     variable_cost_ratio: float = 0.35
     competition_radius: float = 3.5
@@ -218,6 +236,7 @@ class CampusMarketEnv(Environment):
         competition_radius: float = 3.5,
         demand_noise_scale: float = 0.15,
     ) -> None:
+        fallback_price_ranges = self._build_default_price_ranges(min_price, max_price)
         self.config = EnvironmentConfig(
             grid_size=grid_size,
             num_agents=num_agents,
@@ -226,6 +245,7 @@ class CampusMarketEnv(Environment):
             min_price=min_price,
             max_price=max_price,
             initial_price=(min_price + max_price) / 2.0,
+            price_ranges_by_type=fallback_price_ranges,
             competition_radius=competition_radius,
             demand_noise_scale=demand_noise_scale,
         )
@@ -298,15 +318,17 @@ class CampusMarketEnv(Environment):
         return self._cached_state
 
     def sample_random_actions(self) -> dict[str, dict[str, Any]]:
-        return {
-            agent_id: {
-                "business_type": str(self._rng.choice(BUSINESS_TYPES)),
+        actions: dict[str, dict[str, Any]] = {}
+        for agent_id in self._shops or {agent_id: None for agent_id in self._agent_ids()}:
+            business_type = str(self._rng.choice(BUSINESS_TYPES))
+            price_range = self._price_range_for_type(business_type)
+            actions[agent_id] = {
+                "business_type": business_type,
                 "price": float(
-                    self._rng.uniform(self.config.min_price, self.config.max_price)
+                    self._rng.uniform(price_range.min_price, price_range.max_price)
                 ),
             }
-            for agent_id in self._shops or {agent_id: None for agent_id in self._agent_ids()}
-        }
+        return actions
 
     def _agent_ids(self) -> list[str]:
         return [f"agent_{index}" for index in range(self.config.num_agents)]
@@ -326,7 +348,11 @@ class CampusMarketEnv(Environment):
                 agent_id=agent_id,
                 position=position,
                 business_type=BUSINESS_TYPES[index % len(BUSINESS_TYPES)],
-                price=float(self.config.initial_price),
+                price=float(
+                    self._price_range_for_type(
+                        BUSINESS_TYPES[index % len(BUSINESS_TYPES)]
+                    ).default_price
+                ),
             )
 
         self._student_clusters = []
@@ -405,6 +431,7 @@ class CampusMarketEnv(Environment):
             business_type = str(payload.get("business_type", shop.business_type)).lower()
             if business_type not in BUSINESS_TYPES:
                 business_type = shop.business_type
+            price_range = self._price_range_for_type(business_type)
 
             raw_price = payload.get("price", shop.price)
             try:
@@ -412,10 +439,11 @@ class CampusMarketEnv(Environment):
             except (TypeError, ValueError):
                 price = shop.price
 
-            price = _clip(price, self.config.min_price, self.config.max_price)
+            price = _clip(price, price_range.min_price, price_range.max_price)
             normalized[agent_id] = {
                 "business_type": business_type,
                 "price": round(price, 4),
+                "price_range": self._price_range_dict(price_range),
             }
         return normalized
 
@@ -524,6 +552,9 @@ class CampusMarketEnv(Environment):
             per_shop_info[agent_id] = {
                 "business_type": shop.business_type,
                 "price": round(shop.price, 4),
+                "price_range": self._price_range_dict(
+                    self._price_range_for_type(shop.business_type)
+                ),
                 "position": self._position_dict(shop.position),
                 "customers": shop_metrics.customers,
                 "revenue": round(shop_metrics.revenue, 4),
@@ -558,6 +589,7 @@ class CampusMarketEnv(Environment):
     def _score_shop(
         self, cluster: StudentCluster, shop: ShopAgent
     ) -> tuple[float, dict[str, float]]:
+        price_range = self._price_range_for_type(shop.business_type)
         distance = self._distance(cluster.position, shop.position)
         distance_term = math.exp(-self.config.distance_weight * distance)
         preference_term = cluster.preferences[shop.business_type]
@@ -567,8 +599,8 @@ class CampusMarketEnv(Environment):
             -self.config.price_weight
             * cluster.price_sensitivity
             * (
-                (shop.price - self.config.min_price)
-                / max(self.config.max_price - self.config.min_price, 1e-6)
+                (shop.price - price_range.min_price)
+                / max(price_range.max_price - price_range.min_price, 1e-6)
             )
         )
         score = (
@@ -584,6 +616,8 @@ class CampusMarketEnv(Environment):
             "preference_term": preference_term,
             "budget_term": budget_term,
             "price_term": price_term,
+            "price_range_min": price_range.min_price,
+            "price_range_max": price_range.max_price,
         }
 
     def _allocate_customers(
@@ -674,6 +708,8 @@ class CampusMarketEnv(Environment):
             "time_step": self._state_meta.step_count,
             "max_steps": self.config.max_steps,
             "done": self._done,
+            "business_types": list(BUSINESS_TYPES),
+            "price_ranges_by_type": self._serialize_price_ranges(),
             "grid_size": {"rows": rows, "cols": cols},
             "grid_layout": grid_layout,
             "shops": {
@@ -682,6 +718,9 @@ class CampusMarketEnv(Environment):
                     "position": self._position_dict(shop.position),
                     "business_type": shop.business_type,
                     "price": round(shop.price, 4),
+                    "price_range": self._price_range_dict(
+                        self._price_range_for_type(shop.business_type)
+                    ),
                 }
                 for agent_id, shop in self._shops.items()
             },
@@ -767,6 +806,57 @@ class CampusMarketEnv(Environment):
     @staticmethod
     def _position_dict(position: Position) -> dict[str, int]:
         return asdict(position)
+
+    @staticmethod
+    def _build_default_price_ranges(
+        global_min_price: float, global_max_price: float
+    ) -> dict[str, PriceRange]:
+        def scaled(low_ratio: float, high_ratio: float, default_ratio: float) -> PriceRange:
+            min_value = global_min_price + (global_max_price - global_min_price) * low_ratio
+            max_value = global_min_price + (global_max_price - global_min_price) * high_ratio
+            default_value = global_min_price + (global_max_price - global_min_price) * default_ratio
+            return PriceRange(
+                min_price=round(min_value, 4),
+                max_price=round(max_value, 4),
+                default_price=round(default_value, 4),
+            )
+
+        return {
+            "tea_stall": scaled(0.0, 0.22, 0.08),
+            "fast_food": scaled(0.08, 0.4, 0.2),
+            "fruits_and_juice": scaled(0.1, 0.48, 0.24),
+            "stationery": scaled(0.08, 0.5, 0.22),
+            "food": scaled(0.18, 0.62, 0.34),
+            "general_store": scaled(0.14, 0.68, 0.36),
+            "cafe": scaled(0.28, 0.78, 0.5),
+            "medical_store": scaled(0.18, 0.88, 0.46),
+            "restaurants": scaled(0.42, 1.0, 0.68),
+        }
+
+    def _price_range_for_type(self, business_type: str) -> PriceRange:
+        price_ranges = self.config.price_ranges_by_type or {}
+        if business_type in price_ranges:
+            return price_ranges[business_type]
+        return PriceRange(
+            min_price=self.config.min_price,
+            max_price=self.config.max_price,
+            default_price=self.config.initial_price,
+        )
+
+    @staticmethod
+    def _price_range_dict(price_range: PriceRange) -> dict[str, float]:
+        return {
+            "min_price": round(price_range.min_price, 4),
+            "max_price": round(price_range.max_price, 4),
+            "default_price": round(price_range.default_price, 4),
+        }
+
+    def _serialize_price_ranges(self) -> dict[str, dict[str, float]]:
+        price_ranges = self.config.price_ranges_by_type or {}
+        return {
+            business_type: self._price_range_dict(price_range)
+            for business_type, price_range in price_ranges.items()
+        }
 
 
 def sample_random_actions(
