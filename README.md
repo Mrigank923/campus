@@ -1,255 +1,451 @@
 ---
-title: Campus Environment Server
-emoji: 📟
-colorFrom: gray
-colorTo: yellow
+title: CampusMarketEnv
+emoji: "🏪"
+colorFrom: yellow
+colorTo: green
 sdk: docker
 pinned: false
 app_port: 8000
 base_path: /web
 tags:
   - openenv
+  - reinforcement-learning
+  - simulation
 ---
 
-# Campus Environment
+# CampusMarketEnv
 
-A simple test environment that echoes back messages. Perfect for testing the env APIs as well as demonstrating environment usage patterns.
+`CampusMarketEnv` is a multi-agent economic simulation built for reinforcement learning and OpenEnv.
+
+The environment models a campus neighborhood as a grid world where shop agents compete for student demand. Each agent chooses:
+
+- a `business_type`
+- a `price`
+
+Student clusters then choose where to buy based on:
+
+- distance
+- budget
+- price sensitivity
+- preference match
+
+The goal for each agent is to maximize reward:
+
+```text
+reward = profit - penalties
+```
+
+Where penalties reflect market oversaturation and poor demand alignment.
+
+## What This Project Includes
+
+- A configurable multi-agent environment in `server/campus_environment.py`
+- OpenEnv-compatible action and observation models in `models.py`
+- A FastAPI/OpenEnv server entrypoint in `server/app.py`
+- A lightweight Python client in `client.py`
+
+## Business Types
+
+The current environment supports these shop categories:
+
+- `fast_food`
+- `cafe`
+- `food`
+- `stationery`
+- `general_store`
+- `fruits_and_juice`
+- `tea_stall`
+- `medical_store`
+- `restaurants`
+
+Each business type has its own price range with:
+
+- `min_price`
+- `max_price`
+- `default_price`
+
+This makes the simulation more realistic than using one global price scale for every shop category.
+
+## How The Simulation Works
+
+At a high level, one episode works like this:
+
+1. `reset()` creates a new grid, student clusters, and shops.
+2. Each agent submits an action with `business_type` and `price`.
+3. The environment normalizes each action and clips the price to that business type's allowed range.
+4. Student clusters evaluate all shops using distance, price, affordability, and preference match.
+5. Customers are allocated probabilistically.
+6. Revenue, profit, competition effects, and demand mismatch penalties are computed.
+7. The environment returns the next state, rewards, done flag, and debug info.
+
+## Core API
+
+### Local Environment API
+
+The local Python environment supports:
+
+- `reset() -> dict`
+- `step(action_dict) -> tuple[next_state, rewards, done, info]`
+- `state() -> dict`
+
+Example:
+
+```python
+from server.campus_environment import CampusMarketEnv
+
+env = CampusMarketEnv(seed=21)
+state = env.reset()
+
+actions = {
+    "agent_0": {"business_type": "cafe", "price": 6.5},
+    "agent_1": {"business_type": "tea_stall", "price": 2.0},
+}
+
+next_state, rewards, done, info = env.step(actions)
+
+print(rewards)
+print(done)
+```
+
+### OpenEnv Action Format
+
+The server-facing action payload uses:
+
+```json
+{
+  "actions": {
+    "agent_0": { "business_type": "cafe", "price": 6.5 },
+    "agent_1": { "business_type": "tea_stall", "price": 2.0 }
+  }
+}
+```
 
 ## Quick Start
 
-The simplest way to use the Campus environment is through the `CampusEnv` class:
+### Option 1: Run The Environment Logic Directly
 
-```python
-from campus import CampusAction, CampusEnv
+This is the easiest way to verify that the simulator works.
 
-try:
-    # Create environment from Docker image
-    campusenv = CampusEnv.from_docker_image("campus-env:latest")
-
-    # Reset
-    result = campusenv.reset()
-    print(f"Reset: {result.observation.echoed_message}")
-
-    # Send multiple messages
-    messages = ["Hello, World!", "Testing echo", "Final message"]
-
-    for msg in messages:
-        result = campusenv.step(CampusAction(message=msg))
-        print(f"Sent: '{msg}'")
-        print(f"  → Echoed: '{result.observation.echoed_message}'")
-        print(f"  → Length: {result.observation.message_length}")
-        print(f"  → Reward: {result.reward}")
-
-finally:
-    # Always clean up
-    campusenv.close()
-```
-
-That's it! The `CampusEnv.from_docker_image()` method handles:
-- Starting the Docker container
-- Waiting for the server to be ready
-- Connecting to the environment
-- Container cleanup when you call `close()`
-
-## Building the Docker Image
-
-Before using the environment, you need to build the Docker image:
+From the project root:
 
 ```bash
-# From project root
-docker build -t campus-env:latest -f server/Dockerfile .
+python server/campus_environment.py
 ```
 
-## Deploying to Hugging Face Spaces
+You should see:
 
-You can easily deploy your OpenEnv environment to Hugging Face Spaces using the `openenv push` command:
+- the initial state keys
+- five reward dictionaries from five random steps
+
+This direct mode is useful for:
+
+- smoke testing
+- RL environment debugging
+- experimenting with logic before running the HTTP server
+
+### Option 2: Run The HTTP/OpenEnv Server
+
+Install dependencies first:
 
 ```bash
-# From the environment directory (where openenv.yaml is located)
-openenv push
-
-# Or specify options
-openenv push --namespace my-org --private
+pip install -r server/requirements.txt
 ```
 
-The `openenv push` command will:
-1. Validate that the directory is an OpenEnv environment (checks for `openenv.yaml`)
-2. Prepare a custom build for Hugging Face Docker space (enables web interface)
-3. Upload to Hugging Face (ensuring you're logged in)
-
-### Prerequisites
-
-- Authenticate with Hugging Face: The command will prompt for login if not already authenticated
-
-### Options
-
-- `--directory`, `-d`: Directory containing the OpenEnv environment (defaults to current directory)
-- `--repo-id`, `-r`: Repository ID in format 'username/repo-name' (defaults to 'username/env-name' from openenv.yaml)
-- `--base-image`, `-b`: Base Docker image to use (overrides Dockerfile FROM)
-- `--private`: Deploy the space as private (default: public)
-
-### Examples
+Then start the server:
 
 ```bash
-# Push to your personal namespace (defaults to username/env-name from openenv.yaml)
-openenv push
-
-# Push to a specific repository
-openenv push --repo-id my-org/my-env
-
-# Push with a custom base image
-openenv push --base-image ghcr.io/meta-pytorch/openenv-base:latest
-
-# Push as a private space
-openenv push --private
-
-# Combine options
-openenv push --repo-id my-org/my-env --base-image custom-base:latest --private
+uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
 ```
 
-After deployment, your space will be available at:
-`https://huggingface.co/spaces/<repo-id>`
+Useful endpoints:
 
-The deployed space includes:
-- **Web Interface** at `/web` - Interactive UI for exploring the environment
-- **API Documentation** at `/docs` - Full OpenAPI/Swagger interface
-- **Health Check** at `/health` - Container health monitoring
-- **WebSocket** at `/ws` - Persistent session endpoint for low-latency interactions
+- `http://localhost:8000/docs`
+- `http://localhost:8000/health`
+- `http://localhost:8000/ws`
 
-## Environment Details
+## Verifying That It Works
 
-### Action
-**CampusAction**: Contains a single field
-- `message` (str) - The message to echo back
+### Smoke Test
 
-### Observation
-**CampusObservation**: Contains the echo response and metadata
-- `echoed_message` (str) - The message echoed back
-- `message_length` (int) - Length of the message
-- `reward` (float) - Reward based on message length (length × 0.1)
-- `done` (bool) - Always False for echo environment
-- `metadata` (dict) - Additional info like step count
+Run:
 
-### Reward
-The reward is calculated as: `message_length × 0.1`
-- "Hi" → reward: 0.2
-- "Hello, World!" → reward: 1.3
-- Empty message → reward: 0.0
-
-## Advanced Usage
-
-### Connecting to an Existing Server
-
-If you already have a Campus environment server running, you can connect directly:
-
-```python
-from campus import CampusEnv
-
-# Connect to existing server
-campusenv = CampusEnv(base_url="<ENV_HTTP_URL_HERE>")
-
-# Use as normal
-result = campusenv.reset()
-result = campusenv.step(CampusAction(message="Hello!"))
+```bash
+python server/campus_environment.py
 ```
 
-Note: When connecting to an existing server, `campusenv.close()` will NOT stop the server.
+Expected result:
 
-### Using the Context Manager
+- no crash
+- valid reward dictionaries for each step
 
-The client supports context manager usage for automatic connection management:
+### Determinism Check
 
-```python
-from campus import CampusAction, CampusEnv
+Run:
 
-# Connect with context manager (auto-connects and closes)
-with CampusEnv(base_url="http://localhost:8000") as env:
-    result = env.reset()
-    print(f"Reset: {result.observation.echoed_message}")
-    # Multiple steps with low latency
-    for msg in ["Hello", "World", "!"]:
-        result = env.step(CampusAction(message=msg))
-        print(f"Echoed: {result.observation.echoed_message}")
+```bash
+python - <<'PY'
+from server.campus_environment import CampusMarketEnv
+
+env1 = CampusMarketEnv(seed=11)
+env2 = CampusMarketEnv(seed=11)
+
+state1 = env1.reset()
+state2 = env2.reset()
+
+actions1 = env1.sample_random_actions()
+actions2 = env2.sample_random_actions()
+
+step1 = env1.step(actions1)
+step2 = env2.step(actions2)
+
+print("same shops:", state1["shops"] == state2["shops"])
+print("same actions:", actions1 == actions2)
+print("same rewards:", step1[1] == step2[1])
+print("same metrics:", step1[0]["latest_step_metrics"] == step2[0]["latest_step_metrics"])
+PY
 ```
 
-The client uses WebSocket connections for:
-- **Lower latency**: No HTTP connection overhead per request
-- **Persistent session**: Server maintains your environment state
-- **Efficient for episodes**: Better for many sequential steps
+Expected result:
 
-### Concurrent WebSocket Sessions
+- all lines print `True`
 
-The server supports multiple concurrent WebSocket connections. To enable this,
-modify `server/app.py` to use factory mode:
+### Type-Specific Price Check
+
+Run:
+
+```bash
+python - <<'PY'
+from server.campus_environment import CampusMarketEnv
+
+env = CampusMarketEnv(seed=4)
+env.reset()
+_, _, _, info = env.step({
+    "agent_0": {"business_type": "tea_stall", "price": 99},
+    "agent_1": {"business_type": "restaurants", "price": -5},
+})
+
+print(info["normalized_actions"]["agent_0"])
+print(info["normalized_actions"]["agent_1"])
+PY
+```
+
+This confirms that each type uses its own allowed price band.
+
+## State Structure
+
+The environment state is a structured Python dictionary. Key fields include:
+
+- `episode_id`
+- `time_step`
+- `max_steps`
+- `done`
+- `business_types`
+- `price_ranges_by_type`
+- `grid_size`
+- `grid_layout`
+- `shops`
+- `student_clusters`
+- `demand_signals`
+- `latest_rewards`
+- `latest_step_metrics`
+
+Each shop record includes:
+
+- `agent_id`
+- `position`
+- `business_type`
+- `price`
+- `price_range`
+
+## Reward Design
+
+Each agent reward is based on:
+
+```text
+reward = profit - competition_penalty - demand_mismatch_penalty
+```
+
+Profit is driven by:
+
+- number of customers
+- chosen price
+- operating cost
+
+Penalties are driven by:
+
+- same-type competition nearby
+- poor fit between local demand and realized customers
+
+## Customizing The Environment
+
+Most customization happens inside `server/campus_environment.py`.
+
+### 1. Add Or Remove Business Types
+
+Update:
+
+- `BUSINESS_TYPES`
+- `_build_default_price_ranges()`
+
+If you add a business type, make sure it has:
+
+- a price range
+- student preference support
+- valid initialization behavior
+
+### 2. Change Price Bands
+
+Edit `_build_default_price_ranges()` to adjust:
+
+- `min_price`
+- `max_price`
+- `default_price`
+
+This is the safest place to tune pricing realism.
+
+### 3. Change Grid Size Or Episode Length
+
+When creating the environment:
 
 ```python
-# In server/app.py - use factory mode for concurrent sessions
-app = create_app(
-    CampusEnvironment,  # Pass class, not instance
-    CampusAction,
-    CampusObservation,
-    max_concurrent_envs=4,  # Allow 4 concurrent sessions
+env = CampusMarketEnv(
+    grid_size=(12, 12),
+    num_agents=6,
+    num_student_clusters=10,
+    max_steps=100,
+    seed=42,
 )
 ```
 
-Then multiple clients can connect simultaneously:
+### 4. Change Reward Behavior
 
-```python
-from campus import CampusAction, CampusEnv
-from concurrent.futures import ThreadPoolExecutor
+Tune these config fields in `EnvironmentConfig`:
 
-def run_episode(client_id: int):
-    with CampusEnv(base_url="http://localhost:8000") as env:
-        result = env.reset()
-        for i in range(10):
-            result = env.step(CampusAction(message=f"Client {client_id}, step {i}"))
-        return client_id, result.observation.message_length
+- `base_operating_cost`
+- `variable_cost_ratio`
+- `competition_penalty_weight`
+- `demand_mismatch_penalty_weight`
+- `distance_weight`
+- `preference_weight`
+- `price_weight`
+- `budget_weight`
 
-# Run 4 episodes concurrently
-with ThreadPoolExecutor(max_workers=4) as executor:
-    results = list(executor.map(run_episode, range(4)))
-```
+### 5. Change Demand Stochasticity
 
-## Development & Testing
+Tune:
 
-### Direct Environment Testing
+- `demand_noise_scale`
 
-Test the environment logic directly without starting the HTTP server:
+Lower values make demand more stable.
+Higher values make the simulation noisier.
 
-```bash
-# From the server directory
-python3 server/campus_environment.py
-```
+### 6. Change Student Behavior
 
-This verifies that:
-- Environment resets correctly
-- Step executes actions properly
-- State tracking works
-- Rewards are calculated correctly
+The main customer-choice logic lives in:
 
-### Running Locally
+- `_score_shop()`
+- `_allocate_customers()`
 
-Run the server locally for development:
+That is where to customize:
 
-```bash
-uvicorn server.app:app --reload
-```
+- distance decay
+- budget pressure
+- price sensitivity
+- preference effects
+- outside option behavior
 
-## Project Structure
+## File Guide
 
-```
+```text
 campus/
-├── .dockerignore         # Docker build exclusions
-├── __init__.py            # Module exports
-├── README.md              # This file
-├── openenv.yaml           # OpenEnv manifest
-├── pyproject.toml         # Project metadata and dependencies
-├── uv.lock                # Locked dependencies (generated)
-├── client.py              # CampusEnv client
-├── models.py              # Action and Observation models
+├── README.md
+├── models.py
+├── client.py
+├── openenv.yaml
+├── pyproject.toml
 └── server/
-    ├── __init__.py        # Server module exports
-    ├── campus_environment.py  # Core environment logic
-    ├── app.py             # FastAPI application (HTTP + WebSocket endpoints)
-    └── Dockerfile         # Container image definition
+    ├── app.py
+    ├── campus_environment.py
+    ├── Dockerfile
+    └── __init__.py
 ```
+
+### Important Files
+
+- `server/campus_environment.py`: simulation logic, configuration, reward model
+- `models.py`: OpenEnv action and observation schemas
+- `server/app.py`: HTTP/WebSocket server setup
+- `client.py`: Python client wrapper
+
+## Deploying
+
+### Build Docker Image
+
+```bash
+docker build -t campus-env:latest -f server/Dockerfile .
+```
+
+### Push With OpenEnv
+
+From the project root:
+
+```bash
+openenv push
+```
+
+Or:
+
+```bash
+openenv push --namespace my-org --private
+```
+
+## Troubleshooting
+
+### `python server/campus_environment.py` fails
+
+Check:
+
+- you are running the command from the project root
+- your Python version is 3.10+
+
+### The server does not start
+
+Check that required packages are installed:
+
+```bash
+pip install -r server/requirements.txt
+```
+
+### Prices look wrong
+
+Inspect:
+
+- `price_ranges_by_type` in returned state
+- `info["normalized_actions"]` after each step
+
+This will show which price band was actually applied.
+
+### I want to change the simulation for my own use case
+
+Start with these safe customization points:
+
+- business catalog and price ranges
+- reward weights
+- demand noise
+- student preference generation
+- grid size and episode length
+
+## Suggested Next Improvements
+
+If you want to extend this project further, good next steps are:
+
+- business-type-specific operating costs
+- richer student segments
+- moving shop locations as part of the action space
+- inventory constraints
+- seasonality or weekday demand shifts
+- explicit rent by grid cell
+
+## License
+
+This project follows the repository license terms.
